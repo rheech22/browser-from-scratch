@@ -2,12 +2,14 @@ import socket
 import ssl
 import tkinter
 
-from typing import TYPE_CHECKING
+from tkinter import font as tk_font
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from tkinter import Event
 
 
+# url
 class URL:
     scheme: str
     host: str
@@ -67,40 +69,164 @@ class URL:
         return body
 
 
+# text
+class Text:
+    text: str
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+# tag
+class Tag:
+    tag: str
+
+    def __init__(self, tag: str):
+        self.tag = tag
+
+
+# helpers
 def lex(body: str):
-    text = ''
+    out: list[Text | Tag] = []
+    buffer = ''
     in_tag = False
     for c in body:
         if c == '<':
-            in_tag = True
+            if in_tag:
+                buffer = ''
+            else:
+                in_tag = True
+
+            if buffer:
+                out.append(Text(buffer))
+                buffer = ''
         elif c == '>':
             in_tag = False
-        elif not in_tag:
-            text += c
-    return text
+            out.append(Tag(buffer))
+            buffer = ''
+        else:
+            buffer += c
+    if not in_tag and buffer:
+        out.append(Text(buffer))
+    return out
 
 
-HSTEP, VSTEP = 10, 18
+FONT: dict[
+    tuple[
+        int,
+        Literal['normal', 'bold'],
+        Literal['roman', 'italic'],
+    ],
+    tuple[
+        tk_font.Font,
+        tkinter.Label,
+    ],
+] = {}
+
+
+def get_font(
+    size: int,
+    weight: Literal['normal', 'bold'],
+    style: Literal['roman', 'italic'],
+):
+    key = (size, weight, style)
+
+    if key not in FONT:
+        font = tk_font.Font(
+            size=size,
+            weight=weight,
+            slant=style,
+        )
+        label = tkinter.Label(font=font)
+        FONT[key] = (font, label)
+    return FONT[key][0]
+
+
+# layout
+HSTEP, VSTEP = 13, 18
 WIDTH, HEIGHT = 800, 600
 SCROLL_STEP = 100
 
 
-def layout(text: str):
-    display_list: list[tuple[int, int, str]] = []
-    cursor_x, cursor_y = HSTEP, VSTEP
-    for c in text:
-        display_list.append((cursor_x, cursor_y, c))
-        cursor_x += HSTEP
-        if cursor_x >= WIDTH - HSTEP:
-            cursor_y += VSTEP
-            cursor_x = HSTEP
-    return display_list
+class Layout:
+    # layout state
+    line: list[tuple[float, str, tk_font.Font]]
+    display_list: list[tuple[float, float, str, tk_font.Font]]
+    cursor_x: float = HSTEP
+    cursor_y: float = VSTEP
+    # font state
+    size: int = 12
+    weight: Literal['normal', 'bold']
+    style: Literal['roman', 'italic']
+
+    def __init__(self, tokens: list[Text | Tag]):
+        self.line = []
+        self.display_list = []
+        self.weight, self.style = 'normal', 'roman'
+        for token in tokens:
+            self.token(token)
+        self.flush()
+
+    def token(self, token: Text | Tag):
+        if isinstance(token, Text):
+            for word in token.text.split():
+                self.word(word)
+        elif token.tag == 'i':
+            self.style = 'italic'
+        elif token.tag == '/i':
+            self.style = 'roman'
+        elif token.tag == 'b':
+            self.weight = 'bold'
+        elif token.tag == '/b':
+            self.weight = 'normal'
+        elif token.tag == 'small':
+            self.size -= 2
+        elif token.tag == '/small':
+            self.size += 2
+        elif token.tag == 'big':
+            self.size += 4
+        elif token.tag == '/big':
+            self.size -= 4
+        elif token.tag == 'br':
+            self.flush()
+        elif token.tag == 'p':
+            self.flush()
+        elif token.tag == '/p':
+            self.flush()
+            # if you want to add a paragraph gap, uncomment the following line
+            # self.cursor_y += VSTEP
+
+    def flush(self):
+        if not self.line:
+            return
+        metrics = [font.metrics() for _x, _word, font in self.line]
+        max_ascent = max([metric['ascent'] for metric in metrics])
+        baseline = self.cursor_y + 1.25 * max_ascent
+        for x, word, font in self.line:
+            y = baseline - font.metrics('ascent')
+            self.display_list.append((x, y, word, font))
+        max_descent = max([metric['descent'] for metric in metrics])
+        self.cursor_y = baseline + 1.25 * max_descent
+        self.cursor_x = HSTEP
+        self.line = []
+
+    def word(self, word: str):
+        font = get_font(self.size, self.weight, self.style)
+
+        w = font.measure(word)
+
+        if self.cursor_x + w >= WIDTH - HSTEP:
+            self.flush()
+
+        self.line.append((self.cursor_x, word, font))
+        self.cursor_x += w + font.measure(' ')
 
 
+# browser
 class Browser:
     window: tkinter.Tk
     canvas: tkinter.Canvas
-    display_list: list[tuple[int, int, str]]
+    display_list: list[tuple[float, float, str, tk_font.Font]]
     scroll: int
 
     def __init__(self):
@@ -122,22 +248,25 @@ class Browser:
 
     def draw(self):
         self.canvas.delete('all')
-        for x, y, c in self.display_list:
+        for x, y, c, font in self.display_list:
             # the two branches below make the canvas scroll faster,
             # even if it might not look like it.
             if y > self.scroll + HEIGHT:
                 continue
             if y + VSTEP < self.scroll:
                 continue
-            _ = self.canvas.create_text(x, y - self.scroll, text=c)
+            _ = self.canvas.create_text(
+                x, y - self.scroll, text=c, font=font, anchor='nw'
+            )
 
     def load(self, url: str):
         body = URL(url).request()
-        text = lex(body)
-        self.display_list = layout(text)
+        tokens = lex(body)
+        self.display_list = Layout(tokens).display_list
         self.draw()
 
 
+# main
 if __name__ == '__main__':
     import sys
 
